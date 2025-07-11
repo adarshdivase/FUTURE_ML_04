@@ -5,34 +5,39 @@ from sklearn.metrics.pairwise import cosine_similarity
 import string
 import re
 
-# Load the dataset
-try:
-    df = pd.read_csv('Conversation.csv')
-    # Drop the 'Unnamed: 0' column if it exists and is just an index
-    if 'Unnamed: 0' in df.columns:
-        df = df.drop(columns=['Unnamed: 0'])
-except FileNotFoundError:
-    st.error("Conversation.csv not found. Please make sure it's in the same directory.")
-    st.stop()
-
-# --- Text Preprocessing Function ---
+# --- Text Preprocessing Function (defined once) ---
 def preprocess_text(text):
     text = text.lower() # Lowercasing
     text = re.sub(f'[{re.escape(string.punctuation)}]', '', text) # Remove punctuation
     text = re.sub(r'\s+', ' ', text).strip() # Remove extra spaces
     return text
 
-# Apply preprocessing to the 'question' column
-df['processed_question'] = df['question'].apply(preprocess_text)
+# Use st.cache_resource to load and process data only once
+@st.cache_resource
+def load_data_and_vectorize():
+    try:
+        df = pd.read_csv('Conversation.csv')
+        # Drop the 'Unnamed: 0' column if it exists and is just an index
+        if 'Unnamed: 0' in df.columns:
+            df = df.drop(columns=['Unnamed: 0'])
+    except FileNotFoundError:
+        st.error("Conversation.csv not found. Please make sure it's in the same directory.")
+        st.stop()
 
-# --- TF-IDF Vectorization ---
-# Initialize TF-IDF Vectorizer
-# max_features can be adjusted based on your dataset size and memory
-tfidf_vectorizer = TfidfVectorizer(stop_words='english', max_features=5000)
+    # Apply preprocessing to the 'question' column
+    df['processed_question'] = df['question'].apply(preprocess_text)
 
-# Fit and transform the processed questions
-# We'll use this to compare new queries to our existing questions
-tfidf_matrix = tfidf_vectorizer.fit_transform(df['processed_question'])
+    # Initialize TF-IDF Vectorizer
+    # max_features can be adjusted based on your dataset size and memory
+    tfidf_vectorizer = TfidfVectorizer(stop_words='english', max_features=5000)
+
+    # Fit and transform the processed questions
+    tfidf_matrix = tfidf_vectorizer.fit_transform(df['processed_question'])
+
+    return df, tfidf_vectorizer, tfidf_matrix
+
+# Load cached data and vectorizer
+df, tfidf_vectorizer, tfidf_matrix = load_data_and_vectorize()
 
 # --- Chatbot Logic ---
 def get_bot_response(user_query):
@@ -46,7 +51,7 @@ def get_bot_response(user_query):
     user_tfidf = tfidf_vectorizer.transform([processed_user_query])
 
     # Calculate cosine similarity between user query and all processed questions
-    cosine_similarities = cosine_similarity(user_tfidf, tfid_matrix).flatten()
+    cosine_similarities = cosine_similarity(user_tfidf, tfidf_matrix).flatten()
 
     # Get the index of the most similar question
     most_similar_index = cosine_similarities.argmax()
