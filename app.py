@@ -1,107 +1,97 @@
 import streamlit as st
-import json
-from transformers import AutoModelForCausalLM, AutoTokenizer
-import torch
+import pandas as pd
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+import string
+import re
 
-# --- Configuration & Model Loading ---
-@st.cache_resource
-def load_model():
-    """Loads the conversational model and tokenizer from Hugging Face."""
-    try:
-        tokenizer = AutoTokenizer.from_pretrained("microsoft/DialoGPT-medium")
-        model = AutoModelForCausalLM.from_pretrained("microsoft/DialoGPT-medium")
-        return tokenizer, model
-    except Exception as e:
-        st.error(f"Failed to load the model. Please check your internet connection. Error: {e}")
-        return None, None
+# Load the dataset
+try:
+    df = pd.read_csv('Conversation.csv')
+    # Drop the 'Unnamed: 0' column if it exists and is just an index
+    if 'Unnamed: 0' in df.columns:
+        df = df.drop(columns=['Unnamed: 0'])
+except FileNotFoundError:
+    st.error("Conversation.csv not found. Please make sure it's in the same directory.")
+    st.stop()
 
-# --- Knowledge Base Loading ---
-def load_knowledge_base(file_path):
-    """Loads the knowledge base from a JSON file."""
-    try:
-        with open(file_path, 'r') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        st.error(f"Knowledge base file not found at: {file_path}")
-        return []
-    except json.JSONDecodeError:
-        st.error(f"Error decoding JSON from the knowledge base file: {file_path}")
-        return []
+# --- Text Preprocessing Function ---
+def preprocess_text(text):
+    text = text.lower() # Lowercasing
+    text = re.sub(f'[{re.escape(string.punctuation)}]', '', text) # Remove punctuation
+    text = re.sub(r'\s+', ' ', text).strip() # Remove extra spaces
+    return text
+
+# Apply preprocessing to the 'question' column
+df['processed_question'] = df['question'].apply(preprocess_text)
+
+# --- TF-IDF Vectorization ---
+# Initialize TF-IDF Vectorizer
+# max_features can be adjusted based on your dataset size and memory
+tfidf_vectorizer = TfidfVectorizer(stop_words='english', max_features=5000)
+
+# Fit and transform the processed questions
+# We'll use this to compare new queries to our existing questions
+tfidf_matrix = tfidf_vectorizer.fit_transform(df['processed_question'])
 
 # --- Chatbot Logic ---
-def get_response(user_query, knowledge_base, tokenizer, model, chat_history_ids):
-    """
-    Gets a response from the knowledge base or the local Hugging Face model.
-    """
-    # Check for a direct match in the knowledge base
-    for qa_pair in knowledge_base:
-        if user_query.lower() == qa_pair["question"].lower():
-            return qa_pair["answer"], chat_history_ids
+def get_bot_response(user_query):
+    # Preprocess the user query
+    processed_user_query = preprocess_text(user_query)
 
-    # If no match, use the local conversational model
-    try:
-        # Encode the new user input, add the eos_token and return a tensor in Pytorch
-        new_user_input_ids = tokenizer.encode(user_query + tokenizer.eos_token, return_tensors='pt')
+    if not processed_user_query:
+        return "Please type a question."
 
-        # Append the new user input tokens to the chat history
-        bot_input_ids = torch.cat([chat_history_ids, new_user_input_ids], dim=-1) if len(st.session_state.messages) > 1 else new_user_input_ids
+    # Transform the user query using the *same* fitted TF-IDF vectorizer
+    user_tfidf = tfidf_vectorizer.transform([processed_user_query])
 
-        # Generate a response while limiting the total chat history to 1024 tokens
-        chat_history_ids = model.generate(bot_input_ids, max_length=1024, pad_token_id=tokenizer.eos_token_id)
+    # Calculate cosine similarity between user query and all processed questions
+    cosine_similarities = cosine_similarity(user_tfidf, tfid_matrix).flatten()
 
-        # Decode the last response from the bot
-        response = tokenizer.decode(chat_history_ids[:, bot_input_ids.shape[-1]:][0], skip_special_tokens=True)
-        return response, chat_history_ids
+    # Get the index of the most similar question
+    most_similar_index = cosine_similarities.argmax()
 
-    except Exception as e:
-        st.error(f"An error occurred with the local model: {e}")
-        return "Sorry, I'm having a little trouble thinking right now.", chat_history_ids
+    # Get the similarity score
+    similarity_score = cosine_similarities[most_similar_index]
 
+    # Set a similarity threshold. If the score is too low, the bot doesn't know the answer.
+    # You might need to tune this threshold based on your dataset and desired strictness.
+    if similarity_score < 0.3:  # Adjust this threshold as needed
+        return "I'm sorry, I don't have a direct answer to that. Could you please rephrase?"
+    else:
+        # Retrieve the answer for the most similar question
+        return df['answer'].iloc[most_similar_index]
 
-# --- Streamlit App ---
-st.set_page_config(page_title="Intelligent Chatbot", page_icon="🤖")
+# --- Streamlit UI ---
+st.set_page_config(page_title="Customer Support Chatbot", layout="centered")
 
-st.title("🤖 Intelligent Open-Source Chatbot")
-st.caption("This chatbot uses a local knowledge base and a Hugging Face conversational model.")
-
-# Load model and tokenizer
-tokenizer, model = load_model()
-
-if tokenizer is None or model is None:
-    st.stop()
+st.title("🗣️ Customer Support Chatbot")
+st.markdown("""
+Welcome! I'm a simple chatbot designed to respond to your queries based on our conversation dataset.
+Type your question below and press Enter.
+""")
 
 # Initialize chat history
 if "messages" not in st.session_state:
-    st.session_state.messages = [
-        {"role": "assistant", "content": "Hello! How can I assist you today?"}
-    ]
-# Initialize chat history tensor
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = torch.tensor([])
-
-
-# Load the knowledge base
-knowledge_base = load_knowledge_base('data/knowledge_base.json')
+    st.session_state.messages = []
 
 # Display chat messages from history on app rerun
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# Accept user input
-if prompt := st.chat_input("What is up?"):
+# React to user input
+if prompt := st.chat_input("Ask me a question..."):
+    # Display user message in chat message container
+    st.chat_message("user").markdown(prompt)
     # Add user message to chat history
     st.session_state.messages.append({"role": "user", "content": prompt})
-    # Display user message in chat message container
-    with st.chat_message("user"):
-        st.markdown(prompt)
 
-    # Display assistant response in chat message container
     with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
-            response, chat_history_ids = get_response(prompt, knowledge_base, tokenizer, model, st.session_state.chat_history)
-            st.session_state.chat_history = chat_history_ids
-            st.markdown(response)
-
+        response = get_bot_response(prompt)
+        st.markdown(response)
     # Add assistant response to chat history
     st.session_state.messages.append({"role": "assistant", "content": response})
+
+st.markdown("---")
+st.info("Note: This is a basic chatbot. For more advanced features like intent recognition or contextual conversations, consider using frameworks like Rasa or Dialogflow.")
